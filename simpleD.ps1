@@ -215,23 +215,34 @@ function Invoke-Download {
     return $true
 }
 
-function Expand-Bundle {
-    param([object[]]$Entries, [string[]]$KeepNames, [object[]]$Bundle, [object]$Tools)
-    $pw = 'ms_by_rgadguard'
-    $shared = Join-Path $OutDir ("_bundle_" + $Entries[0].Uuid)
-    if (Test-Path $shared) { Remove-Item $shared -Recurse -Force -ErrorAction SilentlyContinue }
-    New-Item -ItemType Directory -Path $shared | Out-Null
+function Download-WithRetry {
+    param([string]$SrcUuid, [string[]]$WantUuids, [hashtable]$Names, [object]$Tools)
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        if ($attempt -gt 1) { Write-Warn2 "重试 $attempt/3：正在刷新下载链接 ..." }
+        $fresh = @(Get-DownloadEntries $SrcUuid)
+        $set = @($fresh | Where-Object { $WantUuids -contains $_.Uuid })
+        if ($set.Count -eq 0) { $set = $fresh }
+        if (Invoke-Download -Entries $set -Names $Names -Tools $Tools) { return $true }
+    }
+    return $false
+}
 
+function Extract-Entries {
+    param([object[]]$Entries, [string]$Shared, [object]$Tools)
+    $pw = 'ms_by_rgadguard'
     foreach ($e in $Entries) {
         $arc = Join-Path $OutDir "$($e.Uuid).7z"
         if (-not (Test-Path $arc)) { Write-Warn2 "未找到压缩包：$arc"; continue }
         Write-Info "`n正在解压 $($e.Uuid).7z ..."
-        $p7 = Start-Process -FilePath $Tools.SevenZip -ArgumentList @('x', ('"{0}"' -f $arc), ('"-o{0}"' -f $shared), ('-p{0}' -f $pw), '-y', '-bsp1') -NoNewWindow -Wait -PassThru
+        $p7 = Start-Process -FilePath $Tools.SevenZip -ArgumentList @('x', ('"{0}"' -f $arc), ('"-o{0}"' -f $Shared), ('-p{0}' -f $pw), '-y', '-bsp1') -NoNewWindow -Wait -PassThru
         if ($p7.ExitCode -ne 0) { Write-Err2 "7z 解压失败（码 $($p7.ExitCode)）：$arc" }
     }
+}
 
+function Rebuild-Shared {
+    param([string]$Shared, [object]$Tools)
     for ($pass = 1; $pass -le 8; $pass++) {
-        $pending = @(Get-ChildItem $shared -Recurse -File -Include *.svf, *.dvp -ErrorAction SilentlyContinue)
+        $pending = @(Get-ChildItem $Shared -Recurse -File -Include *.svf, *.dvp -ErrorAction SilentlyContinue)
         if ($pending.Count -eq 0) { break }
         $progressed = $false
         foreach ($f in $pending) {
@@ -239,18 +250,26 @@ function Expand-Bundle {
             if (Test-Path $target) { Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue; $progressed = $true; continue }
             Write-Info "正在重建 $($f.BaseName) ..."
             if ($f.Extension -eq '.svf') {
-                if (-not $Tools.Smv) { Write-Err2 "缺少 smv.exe"; continue }
+                if (-not $Tools.Smv) { continue }
                 $r = Start-Process -FilePath $Tools.Smv -ArgumentList @('x', ('"{0}"' -f $f.Name), '-br', '.') -WorkingDirectory $f.DirectoryName -NoNewWindow -Wait -PassThru
             } else {
-                if (-not $Tools.Dvp) { Write-Err2 "缺少 dvp.exe"; continue }
+                if (-not $Tools.Dvp) { continue }
                 $r = Start-Process -FilePath $Tools.Dvp -ArgumentList @('-o', ('"{0}"' -f $target), ('"{0}"' -f $f.FullName)) -NoNewWindow -Wait -PassThru
             }
             if ($r.ExitCode -eq 0 -and (Test-Path $target)) { Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue; $progressed = $true }
         }
         if (-not $progressed) { break }
     }
+}
 
-    $images = @(Get-ChildItem $shared -Recurse -File | Where-Object { $_.Extension -notin '.svf', '.dvp', '.hash' })
+function Test-Built {
+    param([string]$Shared, [string]$Name)
+    return [bool](Get-ChildItem $Shared -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $Name } | Select-Object -First 1)
+}
+
+function Finalize-Bundle {
+    param([object[]]$Entries, [string[]]$KeepNames, [object[]]$Bundle, [string]$Shared, [object]$Tools)
+    $images = @(Get-ChildItem $Shared -Recurse -File | Where-Object { $_.Extension -notin '.svf', '.dvp', '.hash' })
     $kept = 0
     $verifyFail = $false
     foreach ($img in $images) {
@@ -268,9 +287,8 @@ function Expand-Bundle {
                     Write-Info "正在校验 SHA-1 ..."
                     $hashOut = & certutil -hashfile $dest SHA1 2>&1
                     $local = ($hashOut | Select-String -Pattern '^[0-9a-fA-F]{40}$').Line
-                    if (-not $local) { $local = ($hashOut | Select-String -Pattern '^([0-9a-fA-F]{40})$').Matches.Groups[1].Value }
-                    if (-not $local) { Write-Warn2 "   （无法计算本地 SHA-1）"; continue }
-                    if ($local -ieq $remote) { Write-Ok ("   SHA-1 校验通过  {0}" -f $local.ToLower()) }
+                    if (-not $local) { Write-Warn2 "   （无法计算本地 SHA-1）" }
+                    elseif ($local -ieq $remote) { Write-Ok ("   SHA-1 校验通过  {0}" -f $local.ToLower()) }
                     else { Write-Err2 ("   SHA-1 不匹配！本地={0} 期望={1}" -f $local.ToLower(), $remote.ToLower()); $verifyFail = $true }
                 } else { Write-Warn2 "   （无法获取参考 SHA-1，跳过校验）" }
             }
@@ -278,15 +296,15 @@ function Expand-Bundle {
         }
     }
 
-    $leftover = @(Get-ChildItem $shared -Recurse -File -Include *.svf, *.dvp -ErrorAction SilentlyContinue)
+    $leftover = @(Get-ChildItem $Shared -Recurse -File -Include *.svf, *.dvp -ErrorAction SilentlyContinue)
     if ($kept -ge $KeepNames.Count -and $leftover.Count -eq 0 -and -not $verifyFail) {
-        Remove-Item $shared -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $Shared -Recurse -Force -ErrorAction SilentlyContinue
         if (-not $KeepArchive) { foreach ($e in $Entries) { Remove-Item (Join-Path $OutDir "$($e.Uuid).7z") -Force -ErrorAction SilentlyContinue } }
     } else {
         if ($verifyFail) { Write-Err2 "校验失败，已保留压缩包以便重试。" }
         else { Write-Err2 "重建不完整（已保留 $kept / 需要 $($KeepNames.Count)）。未删除任何文件，请手动检查：" }
-        Write-Warn2 "  组目录：$shared"
-        Get-ChildItem $shared -Recurse -File | ForEach-Object { Write-Host ("    " + $_.FullName) -ForegroundColor DarkGray }
+        Write-Warn2 "  组目录：$Shared"
+        Get-ChildItem $Shared -Recurse -File | ForEach-Object { Write-Host ("    " + $_.FullName) -ForegroundColor DarkGray }
     }
 }
 
@@ -311,32 +329,39 @@ function Show-Leaf {
 
     Write-Host ''
     if ($all.Count -gt 1) {
-        Write-Warn2 "提示：rg-adguard 把它打包成一个差分组，共 $($all.Count) 个文件（会整组下载，只保留你选的这个）。"
+        Write-Warn2 "提示：rg-adguard 把它打包成一个差分组，共 $($all.Count) 个文件（先只下这一个，缺基准才补下其它）。"
     }
     $totalGB = ($bundle | Measure-Object -Property SizeGB -Sum).Sum
-    Write-Host ("组内文件数：{0}    镜像总大小：{1:F2} GB" -f $bundle.Count, $totalGB) -ForegroundColor DarkGray
+    Write-Host ("组内文件数：{0}    整组镜像总大小：{1:F2} GB（通常只需下载其中一小部分）" -f $bundle.Count, $totalGB) -ForegroundColor DarkGray
     Write-Host ''
-    Write-Warn2 '简版：自动选择「只保留该文件」，开始下载 ...'
-    $keep = @($requestedName)
+    Write-Warn2 '简版：自动只要你选的这个文件，开始下载 ...'
 
     $namesMap = @{}
     foreach ($b in $bundle) {
         $namesMap[$b.Uuid] = $b.Name
         if ($b.Size) { $namesMap[($b.Uuid + '_size')] = $b.Size }
     }
+    $allUuids = @($all | ForEach-Object { $_.Uuid })
+    $reqUuid  = if (@($all | Where-Object { $_.Uuid -eq $uuid }).Count -gt 0) { $uuid } else { $all[0].Uuid }
 
-    $ok = $false
-    for ($attempt = 1; $attempt -le 3; $attempt++) {
-        if ($attempt -gt 1) {
-            Write-Warn2 "重试 $attempt/3：正在刷新下载链接 ..."
-            $all = Get-DownloadEntries $uuid
-        }
-        if (Invoke-Download -Entries $all -Names $namesMap -Tools $Tools) { $ok = $true; break }
+    $shared = Join-Path $OutDir ("_bundle_" + $uuid)
+    if (Test-Path $shared) { Remove-Item $shared -Recurse -Force -ErrorAction SilentlyContinue }
+    New-Item -ItemType Directory -Path $shared | Out-Null
+
+    if (-not (Download-WithRetry -SrcUuid $uuid -WantUuids @($reqUuid) -Names $namesMap -Tools $Tools)) { Read-Host '按回车继续' | Out-Null; return }
+    $reqEntry = @($all | Where-Object { $_.Uuid -eq $reqUuid })
+    Extract-Entries -Entries $reqEntry -Shared $shared -Tools $Tools
+    Rebuild-Shared -Shared $shared -Tools $Tools
+    if (-not (Test-Built -Shared $shared -Name $requestedName) -and $all.Count -gt 1) {
+        Write-Warn2 "`n所选文件是差分包，需要同组其它文件作为基准，正在补充下载其余 $($all.Count - 1) 个 ..."
+        $restUuids = @($allUuids | Where-Object { $_ -ne $reqUuid })
+        if (-not (Download-WithRetry -SrcUuid $uuid -WantUuids $restUuids -Names $namesMap -Tools $Tools)) { Read-Host '按回车继续' | Out-Null; return }
+        $restEntries = @($all | Where-Object { $_.Uuid -ne $reqUuid })
+        Extract-Entries -Entries $restEntries -Shared $shared -Tools $Tools
+        Rebuild-Shared -Shared $shared -Tools $Tools
     }
-    if ($ok) {
-        Expand-Bundle -Entries $all -KeepNames $keep -Bundle $bundle -Tools $Tools
-        Write-Ok "`n完成。输出目录：$OutDir"
-    }
+    Finalize-Bundle -Entries $all -KeepNames @($requestedName) -Bundle $bundle -Shared $shared -Tools $Tools
+    Write-Ok "`n完成。输出目录：$OutDir"
     Read-Host '按回车继续' | Out-Null
 }
 
