@@ -295,7 +295,7 @@ function Finalize-Bundle {
     }
 
     $leftover = @(Get-ChildItem $Shared -Recurse -File -Include *.svf, *.dvp -ErrorAction SilentlyContinue)
-    if ($kept -ge $KeepNames.Count -and $leftover.Count -eq 0 -and -not $verifyFail) {
+    if ($kept -ge $KeepNames.Count -and -not $verifyFail) {
         Remove-Item $Shared -Recurse -Force -ErrorAction SilentlyContinue
         if (-not $KeepArchive) { foreach ($e in $Entries) { Remove-Item (Join-Path $OutDir "$($e.Uuid).7z") -Force -ErrorAction SilentlyContinue } }
     } else {
