@@ -100,13 +100,32 @@ function Get-DownloadEntries {
     return $entries
 }
 
+function Convert-ToGB {
+    param([string]$s)
+    if (-not $s) { return 0 }
+    $m = [regex]::Match($s, '([\d.]+)\s*(TB|GB|MB|KB|B)')
+    if (-not $m.Success) { return 0 }
+    $v = [double]$m.Groups[1].Value
+    switch ($m.Groups[2].Value.ToUpper()) {
+        'TB' { $v * 1024 }
+        'GB' { $v }
+        'MB' { $v / 1024 }
+        'KB' { $v / 1024 / 1024 }
+        'B'  { $v / 1GB }
+        default { 0 }
+    }
+}
+
 function Get-BundleList {
     param([string]$Uuid)
     $raw = (Invoke-WebRequest -Uri "$Server/file/$Uuid/list" -UserAgent $UA -UseBasicParsing -TimeoutSec 40).Content
     $list = New-Object System.Collections.Generic.List[object]
     foreach ($line in ($raw -split "`n")) {
         $p = $line.Trim() -split '\|'
-        if ($p.Count -ge 2 -and $p[0]) { $list.Add([pscustomobject]@{ Uuid = $p[0].Trim(); Name = $p[1].Trim() }) }
+        if ($p.Count -ge 2 -and $p[0]) {
+            $sz = if ($p.Count -ge 3) { $p[2].Trim() } else { '' }
+            $list.Add([pscustomobject]@{ Uuid = $p[0].Trim(); Name = $p[1].Trim(); Size = $sz; SizeGB = (Convert-ToGB $sz) })
+        }
     }
     return $list
 }
@@ -153,30 +172,44 @@ function Resolve-Tools {
 }
 
 function Invoke-Download {
-    param([object[]]$Entries, [object]$Tools)
+    param([object[]]$Entries, [hashtable]$Names, [object]$Tools)
     if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
-    $inputFile = Join-Path $env:TEMP ("rgiso_{0}.txt" -f ([guid]::NewGuid().ToString('N')))
-    $sb = New-Object System.Text.StringBuilder
-    foreach ($e in $Entries) {
+    $total = $Entries.Count
+    for ($idx = 0; $idx -lt $total; $idx++) {
+        $e = $Entries[$idx]
+        $label = if ($Names -and $Names.ContainsKey($e.Uuid)) { $Names[$e.Uuid] } else { $e.Uuid }
+        $sizeLabel = ''
+        if ($Names -and $Names.ContainsKey(($e.Uuid + '_size'))) { $sizeLabel = ' (' + $Names[$e.Uuid + '_size'] + ')' }
+        Write-Info ("[{0}/{1}] {2}{3}" -f ($idx + 1), $total, $label, $sizeLabel)
+        $arc = Join-Path $OutDir "$($e.Uuid).7z"
+        if (Test-Path $arc) {
+            if (Test-Path "$arc.aria2") {
+                Write-Host ('  检测到未完成的下载，继续续传 ...' ) -ForegroundColor DarkGray
+            } else {
+                Write-Host ('  已有文件且已完成，跳过下载' ) -ForegroundColor DarkGray; continue
+            }
+        }
+        $inputFile = Join-Path $env:TEMP ("rgiso_{0}.txt" -f ([guid]::NewGuid().ToString('N')))
+        $sb = New-Object System.Text.StringBuilder
         [void]$sb.AppendLine($e.Url)
         [void]$sb.AppendLine("  out=$($e.Uuid).7z")
         if ($e.Sha1) { [void]$sb.AppendLine("  checksum=sha-1=$($e.Sha1)") }
+        Set-Content -Path $inputFile -Value $sb.ToString() -Encoding ASCII
+        $aria2Args = @(
+            '--input-file', ('"{0}"' -f $inputFile),
+            '--dir', ('"{0}"' -f $OutDir),
+            '-x', $Connections, '-s', $Connections, '-j', 1,
+            '-c', '-R', '--auto-file-renaming=false', '--allow-overwrite=true',
+            '--disable-ipv6', '--check-integrity=true',
+            '--summary-interval=0', '--console-log-level=warn'
+        )
+        $proc = Start-Process -FilePath $Tools.Aria -ArgumentList $aria2Args -NoNewWindow -Wait -PassThru
+        Remove-Item $inputFile -Force -ErrorAction SilentlyContinue
+        if ($proc.ExitCode -ne 0) {
+            Write-Err2 ("  aria2c 退出码 $($proc.ExitCode)（403 = 数据中心/VPN 出口 IP，请关代理或用家用宽带；22 = HTTP 响应异常）。")
+            return $false
+        }
     }
-    Set-Content -Path $inputFile -Value $sb.ToString() -Encoding ASCII
-
-    $aria2Args = @(
-        '--input-file', ('"{0}"' -f $inputFile),
-        '--dir', ('"{0}"' -f $OutDir),
-        '-x', $Connections, '-s', $Connections, '-j', 1,
-        '-c', '-R', '--auto-file-renaming=false', '--allow-overwrite=true',
-        '--disable-ipv6', '--check-integrity=true',
-        '--summary-interval=0', '--console-log-level=warn'
-    )
-    Write-Info "`n开始下载（aria2c，$Connections 个连接）-> $OutDir`n"
-    $proc = Start-Process -FilePath $Tools.Aria -ArgumentList $aria2Args -NoNewWindow -Wait -PassThru
-    $code = $proc.ExitCode
-    Remove-Item $inputFile -Force -ErrorAction SilentlyContinue
-    if ($code -ne 0) { Write-Err2 "`naria2c 退出码 $code（403 = 数据中心/VPN 出口 IP，请关代理或用家用宽带；22 = HTTP 响应异常）。"; return $false }
     return $true
 }
 
@@ -277,8 +310,12 @@ function Show-Leaf {
     if ($all.Count -gt 1) {
         Write-Warn2 "提示：rg-adguard 把它打包成一个差分组，共 $($all.Count) 个文件。"
         Write-Warn2 "无论如何都会下载整组（重建所需），下面的选择只决定最终保留哪些镜像。"
-        Write-Host ''
     }
+    Write-Host ''
+    $totalGB = 0
+    $totalGB = ($bundle | Measure-Object -Property SizeGB -Sum).Sum
+    Write-Host ("组内文件数：{0}    镜像总大小：{1:F2} GB" -f $bundle.Count, $totalGB) -ForegroundColor DarkGray
+    Write-Host ''
     for ($i = 0; $i -lt $bundle.Count; $i++) {
         $tag = if ($bundle[$i].Uuid -eq $uuid) { '  <= 你选择的' } else { '' }
         Write-Host ("   [{0}] {1}{2}" -f ($i + 1), $bundle[$i].Name, $tag)
@@ -294,13 +331,19 @@ function Show-Leaf {
         default { return }
     }
 
+    $namesMap = @{}
+    foreach ($b in $bundle) {
+        $namesMap[$b.Uuid] = $b.Name
+        if ($b.Size) { $namesMap[($b.Uuid + '_size')] = $b.Size }
+    }
+
     $ok = $false
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         if ($attempt -gt 1) {
             Write-Warn2 "重试 $attempt/3：正在刷新下载链接 ..."
             $all = Get-DownloadEntries $uuid
         }
-        if (Invoke-Download -Entries $all -Tools $Tools) { $ok = $true; break }
+        if (Invoke-Download -Entries $all -Names $namesMap -Tools $Tools) { $ok = $true; break }
     }
     if ($ok) {
         Expand-Bundle -Entries $all -KeepNames $keep -Bundle $bundle -Tools $Tools
