@@ -10,6 +10,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function D { param([string]$b) [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b)) }
+
+$Server   = D 'aHR0cHM6Ly9maWxlcy5yZy1hZGd1YXJkLm5ldA=='
+$Pw       = D 'bXNfYnlfcmdhZGd1YXJk'
+$Secret   = D 'V0lTTy02ZGFlMWQwYzk1Yzg0ODIxLTIwMjY='
+$OsRoot   = "$Server/version/" + (D 'ZjBiZDgzMDctZDg5Ny1lZjc3LWRiZDYtMjE2ZmVmYmU5NGM1')
+$SiteHost = ([Uri]$Server).Host
+$RegPath  = 'HKCU:\Software\SysImgSvc'
+
 $InMemory = [string]::IsNullOrEmpty($PSCommandPath) -and [string]::IsNullOrEmpty($MyInvocation.MyCommand.Path)
 
 if ($InMemory) {
@@ -27,8 +36,7 @@ if ($InMemory) {
 if (-not $OutDir)   { $OutDir   = Join-Path $BaseDir 'downloads' }
 if (-not $ToolsDir) { $ToolsDir = Join-Path $BaseDir 'bin' }
 
-$Server = 'https://files.rg-adguard.net'
-$UA     = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+$UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11
 
@@ -45,6 +53,49 @@ function Get-FreeGB {
     } catch { return -1 }
 }
 
+function Get-CodeCheck {
+    param([string]$Serial)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $hash = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Secret + '|' + $Serial.ToUpper()))
+    $hex = -join ($hash | ForEach-Object { $_.ToString('x2') })
+    return $hex.Substring(0, 6).ToUpper()
+}
+
+function Test-CodeValid {
+    param([string]$Code)
+    $c = ($Code -replace '\s', '').ToUpper()
+    if ($c -notmatch '^([A-Z0-9]{6,})-([0-9A-F]{6})$') { return $false }
+    return ((Get-CodeCheck $Matches[1]) -eq $Matches[2])
+}
+
+function Get-CodeSerial {
+    param([string]$Code)
+    return (($Code -replace '\s', '').ToUpper() -split '-')[0]
+}
+
+function Test-CodeUsed {
+    param([string]$Code)
+    $s = Get-CodeSerial $Code
+    try { Get-ItemProperty -Path $RegPath -Name $s -ErrorAction Stop | Out-Null; return $true } catch { return $false }
+}
+
+function Register-CodeUsed {
+    param([string]$Code)
+    $s = Get-CodeSerial $Code
+    if (-not (Test-Path $RegPath)) { New-Item -Path $RegPath -Force | Out-Null }
+    New-ItemProperty -Path $RegPath -Name $s -Value (Get-Date -Format s) -PropertyType String -Force | Out-Null
+}
+
+function Read-ValidCode {
+    while ($true) {
+        $c = (Read-Host '请输入下载码（输入 q 取消）').Trim()
+        if ($c -eq 'q' -or $c -eq 'Q') { return $null }
+        if (-not (Test-CodeValid $c)) { Write-Err2 '× 下载码无效，请获取正确的下载码。'; continue }
+        if (Test-CodeUsed $c) { Write-Err2 '× 该下载码已使用过（一码一次），请更换新的下载码。'; continue }
+        return (($c -replace '\s', '').ToUpper())
+    }
+}
+
 function Get-Html {
     param([string]$Url)
     for ($i = 1; $i -le 3; $i++) {
@@ -59,7 +110,7 @@ function Get-Html {
 
 function Get-ChildNodes {
     param([string]$Html, [string[]]$AncestorUrls)
-    $rx = [regex]'href="(https://files\.rg-adguard\.net/(category|version|language|files|file)/[0-9a-f-]{36})">([^<]+)</a>'
+    $rx = [regex]('href="(https://' + [regex]::Escape($SiteHost) + '/(category|version|language|files|file)/[0-9a-f-]{36})">([^<]+)</a>')
     $seen = @{}
     $out  = New-Object System.Collections.Generic.List[object]
     foreach ($m in $rx.Matches($Html)) {
@@ -157,7 +208,7 @@ function Resolve-Tools {
     $dvp = if (Test-Path (Join-Path $ToolsDir 'dvp.exe')) { Join-Path $ToolsDir 'dvp.exe' } else { $null }
 
     if (-not $aria -or -not $sevenzip -or -not $smv -or -not $dvp) {
-        Write-Warn2 "缺少工具，正在从 $Server/tools 下载工具集（aria2c + 7z）..."
+        Write-Warn2 "缺少工具，正在下载工具集（aria2c + 7z）..."
         if (-not (Test-Path $ToolsDir)) { New-Item -ItemType Directory -Path $ToolsDir -Force | Out-Null }
         $cab = Join-Path $ToolsDir 'tools.cab'
         Invoke-WebRequest -Uri "$Server/tools" -UserAgent $UA -OutFile $cab -UseBasicParsing -TimeoutSec 120
@@ -235,12 +286,11 @@ function Download-WithRetry {
 
 function Extract-Entries {
     param([object[]]$Entries, [string]$Shared, [object]$Tools)
-    $pw = 'ms_by_rgadguard'
     foreach ($e in $Entries) {
         $arc = Join-Path $OutDir "$($e.Uuid).7z"
         if (-not (Test-Path $arc)) { Write-Warn2 "未找到压缩包：$arc"; continue }
         Write-Info "`n正在解压 $($e.Uuid).7z ..."
-        $p7 = Start-Process -FilePath $Tools.SevenZip -ArgumentList @('x', ('"{0}"' -f $arc), ('"-o{0}"' -f $Shared), ('-p{0}' -f $pw), '-y', '-bsp1') -NoNewWindow -Wait -PassThru
+        $p7 = Start-Process -FilePath $Tools.SevenZip -ArgumentList @('x', ('"{0}"' -f $arc), ('"-o{0}"' -f $Shared), ('-p{0}' -f $Pw), '-y', '-bsp1') -NoNewWindow -Wait -PassThru
         if ($p7.ExitCode -ne 0) { Write-Err2 "7z 解压失败（码 $($p7.ExitCode)）：$arc" }
     }
 }
@@ -306,7 +356,6 @@ function Finalize-Bundle {
         }
     }
 
-    $leftover = @(Get-ChildItem $Shared -Recurse -File -Include *.svf, *.dvp -ErrorAction SilentlyContinue)
     if ($kept -ge $KeepNames.Count -and -not $verifyFail) {
         Remove-Item $Shared -Recurse -Force -ErrorAction SilentlyContinue
         if (-not $KeepArchive) { foreach ($e in $Entries) { Remove-Item (Join-Path $OutDir "$($e.Uuid).7z") -Force -ErrorAction SilentlyContinue } }
@@ -336,37 +385,25 @@ function Show-Leaf {
     $bundle = @(Get-BundleList $uuid)
     $requestedName = ($bundle | Where-Object { $_.Uuid -eq $uuid } | Select-Object -First 1).Name
     if (-not $requestedName) { $requestedName = $meta.File }
-    $allNames = @($bundle | ForEach-Object { $_.Name })
-    if ($allNames.Count -eq 0) { $allNames = @($requestedName) }
 
-    Write-Host ''
-    if ($all.Count -gt 1) {
-        Write-Warn2 "提示：rg-adguard 把它打包成一个差分组，共 $($all.Count) 个文件。"
-        Write-Warn2 "选 D 会先只下这一个；若它是差分包缺基准，才自动补下同组其它文件。"
-    }
-    Write-Host ''
-    $totalGB = 0
     $totalGB = ($bundle | Measure-Object -Property SizeGB -Sum).Sum
-    Write-Host ("组内文件数：{0}    整组镜像总大小：{1:F2} GB（选 D 通常远小于此）" -f $bundle.Count, $totalGB) -ForegroundColor DarkGray
+    Write-Host ("组内文件数：{0}    整组镜像总大小：{1:F2} GB" -f $bundle.Count, $totalGB) -ForegroundColor DarkGray
 
     $maxGB = ($bundle | Measure-Object -Property SizeGB -Maximum).Maximum
     $needGB = [math]::Ceiling($maxGB * 3)
     $freeGB = Get-FreeGB $OutDir
     if ($freeGB -ge 0 -and $freeGB -lt $needGB) {
-        Write-Warn2 ("磁盘空间可能不足：输出盘剩余 {0} GB，差分重建建议至少 {1} GB 可用空间。" -f $freeGB, $needGB)
+        Write-Warn2 ("⚠ 磁盘空间可能不足：输出盘剩余 {0} GB，差分重建建议至少 {1} GB 可用空间。" -f $freeGB, $needGB)
         Write-Warn2 "建议改用 -OutDir 指定到空间充足的盘（例如 -OutDir D:\WinISO\downloads）。"
+        $go = (Read-Host '仍要继续吗？(y/N)').Trim()
+        if ($go -notmatch '^[yY]') { Write-Warn2 '已取消。'; Read-Host '按回车继续' | Out-Null; return }
     }
+
     Write-Host ''
-    for ($i = 0; $i -lt $bundle.Count; $i++) {
-        $tag = if ($bundle[$i].Uuid -eq $uuid) { '  <= 你选择的' } else { '' }
-        Write-Host ("   [{0}] {1}{2}" -f ($i + 1), $bundle[$i].Name, $tag)
-    }
-    Write-Host ''
-    Write-Host '  [D] 只要你选择的文件（按需下载，尽量省流量）'
-    Write-Host '  [A] 保留组内全部文件（下载整组）'
-    Write-Host '  [B] 返回'
-    $choice = (Read-Host '请选择').Trim().ToUpper()
-    if ($choice -ne 'A' -and $choice -ne 'D') { return }
+    Write-Warn2 '本次下载需要下载码。'
+    $code = Read-ValidCode
+    if (-not $code) { Write-Warn2 '已取消。'; Read-Host '按回车继续' | Out-Null; return }
+    Write-Ok '下载码有效，开始下载 ...'
 
     $namesMap = @{}
     foreach ($b in $bundle) {
@@ -380,26 +417,30 @@ function Show-Leaf {
     if (Test-Path $shared) { Remove-Item $shared -Recurse -Force -ErrorAction SilentlyContinue }
     New-Item -ItemType Directory -Path $shared | Out-Null
 
-    if ($choice -eq 'A') {
-        if (-not (Download-WithRetry -SrcUuid $uuid -WantUuids $allUuids -Names $namesMap -Tools $Tools)) { Read-Host '按回车继续' | Out-Null; return }
-        Extract-Entries -Entries $all -Shared $shared -Tools $Tools
-        Rebuild-Shared -Shared $shared -Tools $Tools
-        Finalize-Bundle -Entries $all -KeepNames $allNames -Bundle $bundle -Shared $shared -Tools $Tools
-    } else {
-        if (-not (Download-WithRetry -SrcUuid $uuid -WantUuids @($reqUuid) -Names $namesMap -Tools $Tools)) { Read-Host '按回车继续' | Out-Null; return }
-        $reqEntry = @($all | Where-Object { $_.Uuid -eq $reqUuid })
-        Extract-Entries -Entries $reqEntry -Shared $shared -Tools $Tools
-        Rebuild-Shared -Shared $shared -Tools $Tools
-        if (-not (Test-Built -Shared $shared -Name $requestedName) -and $all.Count -gt 1) {
-            Write-Warn2 "`n所选文件是差分包，需要同组其它文件作为基准，正在补充下载其余 $($all.Count - 1) 个 ..."
-            $restUuids = @($allUuids | Where-Object { $_ -ne $reqUuid })
-            if (-not (Download-WithRetry -SrcUuid $uuid -WantUuids $restUuids -Names $namesMap -Tools $Tools)) { Read-Host '按回车继续' | Out-Null; return }
-            $restEntries = @($all | Where-Object { $_.Uuid -ne $reqUuid })
-            Extract-Entries -Entries $restEntries -Shared $shared -Tools $Tools
-            Rebuild-Shared -Shared $shared -Tools $Tools
-        }
-        Finalize-Bundle -Entries $all -KeepNames @($requestedName) -Bundle $bundle -Shared $shared -Tools $Tools
+    if (-not (Download-WithRetry -SrcUuid $uuid -WantUuids @($reqUuid) -Names $namesMap -Tools $Tools)) { Read-Host '按回车继续' | Out-Null; return }
+    $reqEntry = @($all | Where-Object { $_.Uuid -eq $reqUuid })
+    Extract-Entries -Entries $reqEntry -Shared $shared -Tools $Tools
+
+    $hasFull = Test-Built -Shared $shared -Name $requestedName
+    $hasDiff = @(Get-ChildItem $shared -Recurse -File -Include *.svf, *.dvp -ErrorAction SilentlyContinue).Count -gt 0
+    if ((-not $hasFull) -and $hasDiff -and $all.Count -gt 1) {
+        Write-Warn2 "`n所选文件是差分包，需要同组其它文件作为基准，正在补充下载其余 $($all.Count - 1) 个 ..."
+        $restUuids = @($allUuids | Where-Object { $_ -ne $reqUuid })
+        if (-not (Download-WithRetry -SrcUuid $uuid -WantUuids $restUuids -Names $namesMap -Tools $Tools)) { Read-Host '按回车继续' | Out-Null; return }
+        $restEntries = @($all | Where-Object { $_.Uuid -ne $reqUuid })
+        Extract-Entries -Entries $restEntries -Shared $shared -Tools $Tools
     }
+
+    Write-Host ''
+    if (-not (Test-CodeValid $code) -or (Test-CodeUsed $code)) {
+        Write-Err2 '下载码二次校验未通过，已中止（未生成镜像）。'
+        Read-Host '按回车继续' | Out-Null; return
+    }
+    Register-CodeUsed $code
+    Write-Ok '下载码已登记（一次性，已消费）。正在合成镜像 ...'
+
+    Rebuild-Shared -Shared $shared -Tools $Tools
+    Finalize-Bundle -Entries $all -KeepNames @($requestedName) -Bundle $bundle -Shared $shared -Tools $Tools
     Write-Ok "`n完成。输出目录：$OutDir"
     Read-Host '按回车继续' | Out-Null
 }
@@ -407,7 +448,7 @@ function Show-Leaf {
 function Start-Browser {
     param([object]$Tools)
     $stack = New-Object System.Collections.Generic.List[object]
-    $stack.Add([pscustomobject]@{ Url = "$Server/category"; Title = '文件列表（根目录）' })
+    $stack.Add([pscustomobject]@{ Url = $OsRoot; Title = '操作系统' })
 
     while ($stack.Count -gt 0) {
         $node = $stack[$stack.Count - 1]
@@ -422,21 +463,30 @@ function Start-Browser {
         $html    = Get-Html $node.Url
         $children = @(Get-ChildNodes -Html $html -AncestorUrls $ancestors)
 
-        Clear-Host
-        Write-Host ("路径：" + (($stack | ForEach-Object { $_.Title }) -join '  >  ')) -ForegroundColor DarkGray
-        Write-Host ''
         if ($children.Count -eq 0) { Write-Warn2 '此处没有条目。'; $stack.RemoveAt($stack.Count - 1); Start-Sleep 1; continue }
+
+        if ($children[0].Type -eq 'files') {
+            $zh = $children | Where-Object { $_.Name -match 'Chinese\s*-\s*Simplified' } | Select-Object -First 1
+            if ($zh) {
+                $curTitle = $stack[$stack.Count - 1].Title
+                $stack[$stack.Count - 1] = [pscustomobject]@{ Url = $zh.Url; Title = ($curTitle + '（简体中文）') }
+                continue
+            }
+        }
 
         $filter = ''
         while ($true) {
             $view = if ($filter) { @($children | Where-Object { $_.Name -match [regex]::Escape($filter) }) } else { $children }
             Clear-Host
+            $isFilePage = ($children[0].Type -eq 'file')
+            $tip = if ($isFilePage) { '第 2 步：选文件' } else { '第 1 步：选系统版本' }
+            Write-Host ("[简版] $tip") -ForegroundColor Green
             Write-Host ("路径：" + (($stack | ForEach-Object { $_.Title }) -join '  >  ')) -ForegroundColor DarkGray
             if ($filter) { Write-Host ("过滤：/$filter  （匹配 $($view.Count) 项）") -ForegroundColor Yellow }
             Write-Host ''
             for ($i = 0; $i -lt $view.Count; $i++) {
                 $mark = switch ($view[$i].Type) { 'file' { '[文件] ' } default { '[目录] ' } }
-                Write-Host ("  {0,3}. {1}{2}" -f ($i+1), $mark, $view[$i].Name)
+                Write-Host ("  {0,3}. {1}{2}" -f ($i + 1), $mark, $view[$i].Name)
             }
             Write-Host ''
             Write-Host '  输入序号进入  |  /文字 过滤  |  . 清除过滤  |  b 返回  |  q 退出' -ForegroundColor DarkGray
@@ -457,13 +507,12 @@ function Start-Browser {
     }
 }
 
-Write-Info "rg-adguard 镜像下载器"
+Write-Info "系统镜像下载器（简版 · 需下载码）"
 
 $psv = $PSVersionTable.PSVersion
 if ($psv.Major -lt 3) {
     Write-Err2 "PowerShell 版本 $psv 过低，需要 3.0 或更高。"
-    Write-Err2 "Win7 SP1：请安装 WMF 5.1 → https://www.microsoft.com/en-us/download/details.aspx?id=54616"
-    Write-Err2 "（这是 Windows 系统更新，安装后需重启，非本脚本能自动完成。）"
+    Write-Err2 "Win7 SP1 请先安装 WMF 5.1（微软官网搜索 'WMF 5.1'）后再运行。"
     exit 1
 }
 

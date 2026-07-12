@@ -39,6 +39,14 @@ function Write-Ok    { param($m) Write-Host $m -ForegroundColor Green }
 function Write-Warn2 { param($m) Write-Host $m -ForegroundColor Yellow }
 function Write-Err2  { param($m) Write-Host $m -ForegroundColor Red }
 
+function Get-FreeGB {
+    param([string]$Path)
+    try {
+        $q = (Split-Path $Path -Qualifier).TrimEnd(':')
+        return [math]::Round((Get-PSDrive -Name $q -ErrorAction Stop).Free / 1GB, 1)
+    } catch { return -1 }
+}
+
 function Get-Html {
     param([string]$Url)
     for ($i = 1; $i -le 3; $i++) {
@@ -247,7 +255,6 @@ function Rebuild-Shared {
         $progressed = $false
         foreach ($f in $pending) {
             $target = Join-Path $f.DirectoryName $f.BaseName
-            if (Test-Path $target) { Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue; $progressed = $true; continue }
             Write-Info "正在重建 $($f.BaseName) ..."
             if ($f.Extension -eq '.svf') {
                 if (-not $Tools.Smv) { continue }
@@ -256,7 +263,12 @@ function Rebuild-Shared {
                 if (-not $Tools.Dvp) { continue }
                 $r = Start-Process -FilePath $Tools.Dvp -ArgumentList @('-o', ('"{0}"' -f $target), ('"{0}"' -f $f.FullName)) -NoNewWindow -Wait -PassThru
             }
-            if ($r.ExitCode -eq 0 -and (Test-Path $target)) { Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue; $progressed = $true }
+            if ($r.ExitCode -eq 0 -and (Test-Path $target) -and (Get-Item $target).Length -gt 0) {
+                Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue
+                $progressed = $true
+            } elseif (Test-Path $target) {
+                Remove-Item $target -Force -ErrorAction SilentlyContinue
+            }
         }
         if (-not $progressed) { break }
     }
@@ -333,6 +345,14 @@ function Show-Leaf {
     }
     $totalGB = ($bundle | Measure-Object -Property SizeGB -Sum).Sum
     Write-Host ("组内文件数：{0}    整组镜像总大小：{1:F2} GB（通常只需下载其中一小部分）" -f $bundle.Count, $totalGB) -ForegroundColor DarkGray
+
+    $maxGB = ($bundle | Measure-Object -Property SizeGB -Maximum).Maximum
+    $needGB = [math]::Ceiling($maxGB * 3)
+    $freeGB = Get-FreeGB $OutDir
+    if ($freeGB -ge 0 -and $freeGB -lt $needGB) {
+        Write-Warn2 ("磁盘空间可能不足：输出盘剩余 {0} GB，差分重建建议至少 {1} GB 可用空间。" -f $freeGB, $needGB)
+        Write-Warn2 "建议改用 -OutDir 指定到空间充足的盘（例如 -OutDir D:\WinISO\downloads）。"
+    }
     Write-Host ''
     Write-Warn2 '简版：自动只要你选的这个文件，开始下载 ...'
 
