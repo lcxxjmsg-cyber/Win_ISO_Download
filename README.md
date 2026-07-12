@@ -23,7 +23,10 @@
 
 ## 环境要求
 
-- Windows + **Windows PowerShell 5.1**（系统自带）
+- Windows + **PowerShell 3.0 或更高版本**
+  - Win10/11：系统自带，开箱即用。
+  - Win8：系统自带（PS 3.0），无需额外安装。
+  - Win7 SP1：需安装 [WMF 3.0](https://www.microsoft.com/en-us/download/details.aspx?id=34595)（或建议直接装 [WMF 5.1](https://www.microsoft.com/en-us/download/details.aspx?id=54616)）。Win7 RTM 不支持。
 - 网络能访问 `files.rg-adguard.net` 与 `dl.rg-adguard.net`
 - 磁盘空间：重建过程中会同时存在 `压缩包 + 解压件 + 成品`，峰值约为目标镜像的 **2–3 倍**
 
@@ -69,27 +72,121 @@ irm https://gh-proxy.com/https://raw.githubusercontent.com/lcxxjmsg-cyber/Win_IS
 
 ---
 
-## 操作说明
+## 使用步骤
 
-在浏览菜单中：
+### 第 1 步：启动脚本
+
+选一种方式启动（推荐方式一），首次运行会自动下载 `aria2c` 和 `7z` 等工具，等待几秒即可进入菜单。
+
+### 第 2 步：选分类
+
+启动后第一个界面是「文件列表（根目录）」，列出了所有一级分类：
+
+```
+[目录] Applications
+[目录] Applications (for Mac)
+[目录] Operating Systems       ← 操作系统在这里
+[目录] Developer Tools
+...
+```
+
+输入序号进入。例如想下 Windows，输入 `Operating Systems` 对应的序号。
+
+> **过滤技巧**：列表太长时，输入 `/关键词` 可实时筛选。例如输入 `/server` 只看带 "server" 的条目，输入 `.` 清除过滤。
+
+### 第 3 步：选版本
+
+进入分类后，会列出该分类下所有版本。以「Operating Systems」为例：
+
+```
+[目录] Windows 11, version 24H2 ...
+[目录] Windows 11, version 23H2 ...
+[目录] Windows 10, version 22H2 ...
+[目录] Windows 8.1 ...
+[目录] Windows 7 with Service Pack 1 ...
+[目录] Windows XP with Service Pack 3 ...
+```
+
+输入序号进入想要的版本。版本按发布时间倒序排列，最新的在最前面。
+
+### 第 4 步：选语言
+
+版本页面列出所有语言：
+
+```
+[目录] Chinese - Simplified    ← 简体中文
+[目录] English
+[目录] Chinese - Traditional   ← 繁体中文
+...
+```
+
+选择一个语言进入。国旗图标可辅助识别。
+
+### 第 5 步：选文件
+
+语言页面列出该版本该语言下的所有镜像文件：
+
+```
+[文件] zh-cn_windows_11_consumer_editions_..._x64_dvd_xxx.iso
+[文件] zh-cn_windows_11_business_editions_..._x64_dvd_xxx.iso
+[文件] zh-cn_windows_11_consumer_editions_..._arm64_dvd_xxx.iso
+```
+
+几个常见判断：
+- **consumer** = 消费版（含家庭版/专业版，普通用户选这个）
+- **business** = 商业版（含专业版/企业版/教育版，无家庭版）
+- **x64** = 64 位，**arm64** = ARM 处理器（一般用 x64）
+- **dvd** 结尾的是完整 ISO 镜像
+
+输入序号进入文件详情页。
+
+### 第 6 步：确认并下载
+
+文件详情页会显示文件名、大小、SHA-256。下方菜单：
+
+```
+  [D] 只保留你选择的文件
+  [A] 保留组内全部文件
+  [B] 返回
+```
+
+- 普通情况选 **D** 即可。
+- 如果一个组里含有多个文件（比如同时含简中 + 英文消费版），选 D 只保留你点进来的那一个，选 A 全留。
+- 选 **B** 返回重挑。
+
+确认后自动开始下载。控制台会显示 `[1/N]` 的进度、实时下载速度和进度条。下载完成后自动解压 → 重建（如有） → SHA-1 校验。
+
+### 第 7 步：拿到镜像
+
+看到 `完成。输出目录：...` 即表示成功。进的输出目录里即有成品文件（`.iso` 或 `.img`）。
+
+中途意外退出也不要紧，重新运行、重新选到同一个文件，**会从断点续传，不会重复下载已完成的文件**。
+
+### 菜单速查
 
 | 输入 | 作用 |
 |------|------|
 | `数字` | 进入对应的目录 / 文件 |
-| `/文字` | 按关键字过滤当前列表（如 `/24h2`、`/consumer`、`/professional`） |
+| `/文字` | 按关键字实时过滤（如 `/24h2`、`/consumer`、`/professional`） |
 | `.` | 清除过滤 |
 | `b` | 返回上一级 |
-| `q` | 退出 |
+| `q` | 退出脚本 |
 
-选中一个文件后：
+选中文件后：
 
 | 输入 | 作用 |
 |------|------|
-| `D` | 只保留你选择的这个文件 |
-| `A` | 保留同组的全部文件 |
-| `B` | 返回 |
+| `D` | 只保留你选择的文件 |
+| `A` | 保留同组全部文件 |
+| `B` | 返回（不下载） |
 
-> **关于差分组**：rg-adguard 会把「同一版本的不同语言/版别」用 SmartVersion 差分打包成一组。因此 `D` 与 `A` **都会下载整组**（重建所必需），区别只是最后**保留哪些**镜像。
+> **关于差分组**：rg-adguard 会把同一版本不同语言的镜像用 SmartVersion 差分打包成一组。`D` 与 `A` **都会下载整组**（重建所必需），区别只是最后保留哪些。
+
+### 拿到镜像后怎么用
+
+- **Win8 及以上**：双击 ISO/IMG 文件即可挂载为虚拟光驱，运行 `setup.exe` 安装。
+- **做启动 U 盘**：用 [Rufus](https://rufus.ie/zh/) 或 Ventoy 写入 U 盘。
+- **激活**：这些是原版安装介质，不含激活工具。安装后需自行用合法的产品密钥激活。
 
 ---
 

@@ -1,4 +1,4 @@
-﻿#requires -version 5.1
+﻿#requires -version 3.0
 [CmdletBinding()]
 param(
     [string]$OutDir      = '',
@@ -264,7 +264,10 @@ function Expand-Bundle {
                 $remote = Get-RemoteSha1 $bu.Uuid
                 if ($remote) {
                     Write-Info "正在校验 SHA-1 ..."
-                    $local = (Get-FileHash -LiteralPath $dest -Algorithm SHA1).Hash
+                    $hashOut = & certutil -hashfile $dest SHA1 2>&1
+                    $local = ($hashOut | Select-String -Pattern '^[0-9a-fA-F]{40}$').Line
+                    if (-not $local) { $local = ($hashOut | Select-String -Pattern '^([0-9a-fA-F]{40})$').Matches.Groups[1].Value }
+                    if (-not $local) { Write-Warn2 "   （无法计算本地 SHA-1）"; continue }
                     if ($local -ieq $remote) { Write-Ok ("   SHA-1 校验通过  {0}" -f $local.ToLower()) }
                     else { Write-Err2 ("   SHA-1 不匹配！本地={0} 期望={1}" -f $local.ToLower(), $remote.ToLower()); $verifyFail = $true }
                 } else { Write-Warn2 "   （无法获取参考 SHA-1，跳过校验）" }
@@ -406,6 +409,16 @@ function Start-Browser {
 }
 
 Write-Info "rg-adguard 镜像下载器"
+
+$psv = $PSVersionTable.PSVersion
+if ($psv.Major -lt 3) {
+    Write-Err2 "PowerShell 版本 $psv 过低，需要 3.0 或更高。"
+    Write-Err2 "Win7 SP1：请安装 WMF 5.1 → https://www.microsoft.com/en-us/download/details.aspx?id=54616"
+    Write-Err2 "（这是 Windows 系统更新，安装后需重启，非本脚本能自动完成。）"
+    exit 1
+}
+
+Write-Host ("输出目录：{0}" -f $OutDir) -ForegroundColor DarkGray
 Write-Host ("输出目录：{0}" -f $OutDir) -ForegroundColor DarkGray
 Write-Host ("工具目录：{0}" -f $ToolsDir) -ForegroundColor DarkGray
 $tools = Resolve-Tools
