@@ -33,7 +33,7 @@ if ($InMemory) {
                elseif ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path }
                else { (Get-Location).Path }
 }
-if (-not $OutDir)   { $OutDir   = Join-Path $BaseDir 'downloads' }
+if (-not $OutDir)   { $OutDir   = Select-OutDir }
 if (-not $ToolsDir) { $ToolsDir = Join-Path $BaseDir 'bin' }
 
 $UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
@@ -44,6 +44,17 @@ function Write-Info  { param($m) Write-Host $m -ForegroundColor Cyan }
 function Write-Ok    { param($m) Write-Host $m -ForegroundColor Green }
 function Write-Warn2 { param($m) Write-Host $m -ForegroundColor Yellow }
 function Write-Err2  { param($m) Write-Host $m -ForegroundColor Red }
+
+function Select-OutDir {
+    $defPath = 'D:\WinIso'
+    Write-Host ''
+    Write-Host ('请选择下载目录（默认 {0}，直接按 Enter 使用默认值，或输入自定义路径）：' -f $defPath) -ForegroundColor Cyan
+    $input = Read-Host
+    if ([string]::IsNullOrWhiteSpace($input)) {
+        return $defPath
+    }
+    return $input.Trim()
+}
 
 function Get-FreeGB {
     param([string]$Path)
@@ -80,7 +91,7 @@ function Get-CodeSerial {
 function Test-ClockOK {
     try {
         $last = (Get-ItemProperty -Path $RegPath -Name '_seen' -ErrorAction Stop).'_seen'
-        if ($last -and ([datetime]$last).Date -gt (Get-Date).Date.AddDays(1)) { return $false }
+        if ($last -and ([datetime]$last).Date -ge (Get-Date).Date.AddDays(1)) { return $false }
     } catch {}
     return $true
 }
@@ -114,12 +125,13 @@ function Read-ValidCode {
     while ($true) {
         $c = (Read-Host '请输入下载码（输入 q 取消）').Trim()
         if ($c -eq 'q' -or $c -eq 'Q') { return $null }
+        $c = ($c -replace '\s', '').ToUpper()
         switch (Get-CodeState $c) {
             'bad'     { Write-Err2 '× 下载码无效，请获取正确的下载码。'; continue }
             'expired' { Write-Err2 '× 下载码已过期（超过有效期），请获取新的下载码。'; continue }
         }
         if (Test-CodeUsed $c) { Write-Err2 '× 该下载码已使用过（一码一次），请更换新的下载码。'; continue }
-        return (($c -replace '\s', '').ToUpper())
+        return $c
     }
 }
 
@@ -430,6 +442,10 @@ function Show-Leaf {
     Write-Warn2 '本次下载需要下载码。'
     $code = Read-ValidCode
     if (-not $code) { Write-Warn2 '已取消。'; Read-Host '按回车继续' | Out-Null; return }
+    if (Test-CodeUsed $code) {
+        Write-Err2 '× 该下载码已使用过（一码一次），无法重复使用。'
+        Read-Host '按回车继续' | Out-Null; return
+    }
     Write-Ok '下载码有效，开始下载 ...'
 
     $namesMap = @{}
@@ -458,9 +474,9 @@ function Show-Leaf {
         Extract-Entries -Entries $restEntries -Shared $shared -Tools $Tools
     }
 
-    Write-Host ''
-    if ((Get-CodeState $code) -ne 'ok' -or (Test-CodeUsed $code)) {
-        Write-Err2 '下载码二次校验未通过，已中止（未生成镜像）。'
+    if ((Get-CodeState $code) -ne 'ok') {
+        Write-Err2 '下载码在下载期间已过期，已中止。'
+        Remove-Item $shared -Recurse -Force -ErrorAction SilentlyContinue
         Read-Host '按回车继续' | Out-Null; return
     }
     Register-CodeUsed $code
