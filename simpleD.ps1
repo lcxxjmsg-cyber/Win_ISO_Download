@@ -26,7 +26,7 @@ if ($InMemory) {
                elseif ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path }
                else { (Get-Location).Path }
 }
-if (-not $OutDir)   { $OutDir   = Join-Path $BaseDir 'downloads' }
+if (-not $OutDir)   { $OutDir   = Select-OutDir }
 if (-not $ToolsDir) { $ToolsDir = Join-Path $BaseDir 'bin' }
 
 $Server = 'https://files.rg-adguard.net'
@@ -38,6 +38,17 @@ function Write-Info  { param($m) Write-Host $m -ForegroundColor Cyan }
 function Write-Ok    { param($m) Write-Host $m -ForegroundColor Green }
 function Write-Warn2 { param($m) Write-Host $m -ForegroundColor Yellow }
 function Write-Err2  { param($m) Write-Host $m -ForegroundColor Red }
+
+function Select-OutDir {
+    $defPath = 'D:\WinIso'
+    Write-Host ''
+    Write-Host ('请选择下载目录（默认 {0}，直接按 Enter 使用默认值，或输入自定义路径）：' -f $defPath) -ForegroundColor Cyan
+    $input = Read-Host
+    if ([string]::IsNullOrWhiteSpace($input)) {
+        return $defPath
+    }
+    return $input.Trim()
+}
 
 function Get-FreeGB {
     param([string]$Path)
